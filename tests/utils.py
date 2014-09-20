@@ -1,9 +1,15 @@
+
+from __future__ import print_function
+
 import functools
 import os
 import re
 import shutil
 import sys
 import tempfile
+
+import subprocess
+import unittest
 
 try:
     # Python2
@@ -12,6 +18,8 @@ except ImportError:
     # Python3
     from io import StringIO
 
+TESTS_DIR = os.path.dirname(__file__)
+MOCK_DIR = os.path.join(TESTS_DIR, 'mock_resources')
 
 def assert_raises(exception_classes, callable_obj=None, *args, **kwargs):
     context = AssertRaisesContext(exception_classes)
@@ -105,3 +113,85 @@ def in_temporary_directory(f):
             return f(*args, **kwds)
     decorated.__name__ = f.__name__
     return decorated
+
+
+def rosinstall(pth, specfile):
+    '''
+    calls rosinstall in pth with given specfile,
+    then replaces CMakelists with catkin's toplevel.cmake'
+    '''
+    assert os.path.exists(specfile), specfile
+    # to save testing time, we do not invoke rosinstall when we
+    # already have a .rosinstall file
+    if not os.path.exists(os.path.join(pth, '.rosinstall')):
+        succeed(["rosinstall", "-j8", "--catkin", "-n",
+                 pth, specfile, '--continue-on-error'], cwd=TESTS_DIR)
+
+
+def run(args, **kwargs):
+    """
+    Call to Popen, returns (errcode, stdout, stderr)
+    """
+    print("run:", args)
+    p = subprocess.Popen(args,
+                         stdout=subprocess.PIPE,
+                         stderr=subprocess.STDOUT,
+                         cwd=kwargs.get('cwd', None))
+    print("P==", p.__dict__)
+    (stdout, stderr) = p.communicate()
+    return (p.returncode, stdout, stderr)
+
+
+def run_and_succeed(cmd, **kwargs):
+    """
+    Asserts that running a command returns zero.
+
+    returns: stdout
+    """
+    print(">>>", cmd, kwargs)
+    (r, out, err) = run(cmd, **kwargs)
+    print("<<<", out)
+    assert r == 0, "cmd failed with result %s:\n %s " % (r, str(cmd))
+    return out
+
+
+def run_and_fail(cmd, **kwargs):
+    """
+    Asserts that running a command returns non-zero.
+
+    returns: stdout
+    """
+    print(">>>", cmd, kwargs)
+    (r, out, err) = run(cmd, withexitstatus=True, **kwargs)
+    print("<<<", out)
+    assert 0 != r, """cmd succeeded, though should fail: %s result=%u\noutput=\n%s""" % (cmd, r, out)
+    return out
+
+def assert_files_exist(prefix, files):
+    """
+    Assert that all files exist in the prefix.
+    """
+    for f in files:
+        p = os.path.join(prefix, f)
+        print("Checking for", p)
+        assert os.path.exists(p), "%s doesn't exist" % p
+
+def assert_warning_message(out_str, pattern=''):
+    """
+    Assert that the stdout returned from a call contains a catkin_tools
+    warning.
+    """
+    found = re.findall('WARNING:', out_str)
+    assert len(found) > 0
+
+    if pattern:
+        found = re.findall(pattern, out_str)
+        assert len(found) > 0
+
+def assert_no_warnings(out_str):
+    """
+    Assert that the stdout returned from a call contains a catkin_tools
+    warning.
+    """
+    found = re.findall('WARNING:', out_str)
+    assert len(found) == 0
