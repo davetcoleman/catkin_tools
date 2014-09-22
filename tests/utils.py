@@ -142,7 +142,7 @@ def run(args, **kwargs):
     return (p.returncode, stdout, stderr)
 
 
-def run_and_succeed(cmd, **kwargs):
+def assert_cmd_success(cmd, **kwargs):
     """
     Asserts that running a command returns zero.
 
@@ -155,7 +155,7 @@ def run_and_succeed(cmd, **kwargs):
     return out
 
 
-def run_and_fail(cmd, **kwargs):
+def assert_cmd_failure(cmd, **kwargs):
     """
     Asserts that running a command returns non-zero.
 
@@ -175,23 +175,3 @@ def assert_files_exist(prefix, files):
         p = os.path.join(prefix, f)
         print("Checking for", p)
         assert os.path.exists(p), "%s doesn't exist" % p
-
-def assert_warning_message(out_str, pattern=''):
-    """
-    Assert that the stdout returned from a call contains a catkin_tools
-    warning.
-    """
-    found = re.findall('WARNING:', out_str)
-    assert len(found) > 0
-
-    if pattern:
-        found = re.findall(pattern, out_str)
-        assert len(found) > 0
-
-def assert_no_warnings(out_str):
-    """
-    Assert that the stdout returned from a call contains a catkin_tools
-    warning.
-    """
-    found = re.findall('WARNING:', out_str)
-    assert len(found) == 0
