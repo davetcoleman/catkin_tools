@@ -136,7 +136,7 @@ def run(args, **kwargs):
     p = subprocess.Popen(args,
                          stdout=subprocess.PIPE,
                          stderr=subprocess.STDOUT,
-                         cwd=kwargs.get('cwd', None))
+                         cwd=kwargs.get('cwd', os.getcwd()))
     print("P==", p.__dict__)
     (stdout, stderr) = p.communicate()
     return (p.returncode, stdout, stderr)
