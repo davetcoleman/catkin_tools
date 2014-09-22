@@ -31,7 +31,7 @@ def test_build_auto_init_no_pkgs():
     cwd = os.getcwd()
     source_space = os.path.join(cwd, 'src')
     os.mkdir(source_space)
-    assert_cmd_success(['catkin', 'create', 'pkg', '-p', source_space, 'pkg_a'])
+    assert_cmd_success(['catkin', 'create', 'pkg', '--rosdistro', 'hydro', '-p', source_space, 'pkg_a'])
     out = assert_cmd_success(['catkin', 'build'])
     assert_no_warnings(out)
     assert_workspace_initialized('.')
