@@ -20,17 +20,19 @@ from threading import Thread
 
 from .color import colorize_cmake
 
-from .common import remove_ansi_escape
-from .common import run_command
+from catkin_tools.common import remove_ansi_escape
+from catkin_tools.runner import run_command
 
 
 class ExecutorEvent(object):
+
     """This is returned by the Executor when an event occurs
 
     Events can be jobs starting/finishing, commands starting/failing/finishing,
     commands producing output (each line is an event), or when the executor
     quits or failes.
     """
+
     def __init__(self, executor_id, event_type, data, package):
         self.executor_id = executor_id
         self.event_type = event_type
@@ -39,6 +41,7 @@ class ExecutorEvent(object):
 
 
 class Executor(Thread):
+
     """Threaded executor for the parallel catkin build jobs"""
     name_prefix = 'build'
 
@@ -121,17 +124,8 @@ class Executor(Thread):
                         self.command_started(command, command.location)
                         # Receive lines from the running command
                         for line in run_command(command.cmd, cwd=command.location):
-                            # If it is a string, log it
-                            if isinstance(line, str):
-                                # Ensure it is not just ansi escape characters
-                                if remove_ansi_escape(line).strip():
-                                    for sub_line in line.splitlines(True):  # keepends=True
-                                        if sub_line:
-                                            if command.stage_name == 'cmake':
-                                                sub_line = colorize_cmake(sub_line)
-                                            self.command_log(sub_line)
-                            else:
-                                # Otherwise it is a return code
+                            # If it is an integer, it corresponds to the command's return code
+                            if isinstance(line, int):
                                 retcode = line
                                 # If the return code is not zero
                                 if retcode != 0:
@@ -145,6 +139,15 @@ class Executor(Thread):
                                     return
                                 else:
                                     self.command_finished(command, command.location, retcode)
+                            else:
+                                # Otherwise it is some sort of string data
+                                # Ensure that the data is not just ansi escape characters
+                                if remove_ansi_escape(line).strip():
+                                    for sub_line in line.splitlines(True):  # keepends=True
+                                        if sub_line:
+                                            if command.stage_name == 'cmake':
+                                                sub_line = colorize_cmake(sub_line)
+                                            self.command_log(sub_line)
                     finally:
                         if install_space_locked:
                             self.install_space_lock.release()
