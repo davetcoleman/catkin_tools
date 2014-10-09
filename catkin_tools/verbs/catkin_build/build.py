@@ -18,7 +18,7 @@ import os
 import stat
 import sys
 import time
-import re
+import yaml
 
 from multiprocessing import cpu_count
 from threading import Lock
@@ -43,19 +43,19 @@ except ImportError as e:
 
 from catkin_tools.notifications import notify
 
-from .color import clr
+from catkin_tools.common import disable_wide_log
+from catkin_tools.common import FakeLock
+from catkin_tools.common import format_time_delta
+from catkin_tools.common import format_time_delta_short
+from catkin_tools.common import get_cached_recursive_build_depends_in_workspace
+from catkin_tools.common import get_recursive_run_depends_in_workspace
+from catkin_tools.common import is_tty
+from catkin_tools.common import log
+from catkin_tools.common import wide_log
 
-from .common import disable_wide_log
-from .common import FakeLock
-from .common import format_time_delta
-from .common import format_time_delta_short
 from .common import get_build_type
-from .common import get_cached_recursive_build_depends_in_workspace
-from .common import get_recursive_run_depends_in_workspace
-from .common import is_tty
-from .common import log
-from .common import wide_log
-from .common import run_command
+
+from .color import clr
 
 from .executor import Executor
 from .executor import ExecutorEvent
@@ -66,86 +66,8 @@ from .job import CMakeJob
 from .output import OutputController
 
 
-def get_resultspace_environment(result_space_path, quiet=False):
-    """Get the environemt variables which result from sourcing another catkin
-    workspace's setup files as the string output of `cmake -E environment`.
-    This command is used to be as portable as possible.
-
-    :param result_space_path: path to a Catkin result-space whose environment should be loaded, ``str``
-    :param quiet: don't throw exceptions, ``bool``
-
-    :returns: a carriage-return-delimted string of environment variables, ``str``
-    """
-    # Check to make sure result_space_path is a valid directory
-    if not os.path.isdir(result_space_path):
-        if quiet:
-            return dict()
-        raise IOError(
-            "Cannot load environment from resultspace \"%s\" because it does not "
-            "exist." % result_space_path
-        )
-
-    # Check to make sure result_space_path contains a `.catkin` file
-    # TODO: `.catkin` should be defined somewhere as an atom in catkin_pkg
-    if not os.path.exists(os.path.join(result_space_path, '.catkin')):
-        if quiet:
-            return dict()
-        raise IOError(
-            "Cannot load environment from resultspace \"%s\" because it does not "
-            "appear to be a catkin-generated resultspace (missing .catkin marker "
-            "file)." % result_space_path
-        )
-
-    # Determine the shell to use to source the setup file
-    shell_path = os.environ['SHELL']
-    (_, shell_name) = os.path.split(shell_path)
-
-    # Use fallback shell if using a non-standard shell
-    if shell_name not in ['bash', 'zsh']:
-        shell_name = 'bash'
-
-    # Check to make sure result_space_path contains the appropriate setup file
-    setup_file_path = os.path.join(result_space_path, 'setup.%s' % shell_name)
-    if not os.path.exists(setup_file_path):
-        if quiet:
-            return dict()
-        raise IOError(
-            "Cannot load environment from resultspace \"%s\" because the "
-            "required setup file \"%s\" does not exist." % (result_space_path, setup_file_path)
-        )
-
-    # Construct a command list which sources the setup file and prints the env to stdout
-    norc_flags = {'bash': '--norc', 'zsh': '-f'}
-    subcommand = 'source %s; cmake -E environment' % (setup_file_path)
-
-    command = [
-        shell_path,
-        norc_flags[shell_name],
-        '-c', subcommand]
-
-    # Run the command to source the other environment and output all environment variables
-    blacklisted_keys = ('_', 'PWD')
-    env_regex = re.compile('(.+?)=(.*)$', re.M)
-    env_dict = dict()
-
-    for line in run_command(command, cwd=os.getcwd()):
-        if isinstance(line, str):
-            matches = env_regex.findall(line)
-            for (key, value) in matches:
-                if key not in blacklisted_keys:
-                    env_dict[key] = value.rstrip()
-
-    return env_dict
-
-
-def load_resultspace_environment(result_space_path):
-    """Load the environemt variables which result from sourcing another
-    workspace path into this process's environment.
-
-    :param result_space_path: path to a Catkin result-space whose environment should be loaded, ``str``
-    """
-    env_dict = get_resultspace_environment(result_space_path)
-    os.environ.update(env_dict)
+BUILDSPACE_MARKER_FILE = '.catkin_tools.yaml'
+DEVELSPACE_MARKER_FILE = '.catkin_tools.yaml'
 
 
 def get_ready_packages(packages, running_jobs, completed):
@@ -168,7 +90,7 @@ def get_ready_packages(packages, running_jobs, completed):
     ready_packages = []
     workspace_packages = [(path, pkg) for path, pkg in packages]
     for path, package in packages:
-        if package.name in (running_jobs.keys() + completed):
+        if package.name in (list(running_jobs.keys()) + completed):
             continue
         # Collect build and buildtool depends, plus recursive build, buildtool, and run depends,
         # Excluding depends which are not in the workspace or which are completed
@@ -226,10 +148,10 @@ def determine_packages_to_be_built(packages, context):
     :rtype: tuple
     """
     start = time.time()
-    workspace_packages = find_packages(context.source_space, exclude_subspaces=True)
+    workspace_packages = find_packages(context.source_space_abs, exclude_subspaces=True)
     # If there are no packages raise
     if not workspace_packages:
-        sys.exit("No packages were found in the source space '{0}'".format(context.source_space))
+        sys.exit("No packages were found in the source space '{0}'".format(context.source_space_abs))
     log("Found '{0}' packages in {1}."
         .format(len(workspace_packages), format_time_delta(time.time() - start)))
 
@@ -267,7 +189,7 @@ def determine_packages_to_be_built(packages, context):
 def _create_unmerged_devel_setup(context):
     # Find all of the leaf packages in the workspace
     # where leaf means that nothing in the workspace depends on it
-    workspace_packages = find_packages(context.source_space, exclude_subspaces=True)
+    workspace_packages = find_packages(context.source_space_abs, exclude_subspaces=True)
     ordered_packages = topological_order_packages(workspace_packages)
     workspace_packages = dict([(p.name, p) for pth, p in workspace_packages.items()])
     dependencies = set([])
@@ -280,7 +202,7 @@ def _create_unmerged_devel_setup(context):
     assert leaf_packages, leaf_packages  # Defensive, there should always be at least one leaf
     leaf_sources = []
     for pkg_name in leaf_packages:
-        source_path = os.path.join(context.devel_space, pkg_name, 'setup.sh')
+        source_path = os.path.join(context.devel_space_abs, pkg_name, 'setup.sh')
         if os.path.isfile(source_path):
             leaf_sources.append('. {0}'.format(source_path))
     # In addition to the leaf packages, we need to source the recursive run depends of the leaf packages
@@ -288,11 +210,11 @@ def _create_unmerged_devel_setup(context):
         [workspace_packages[p] for p in leaf_packages], ordered_packages)
     run_depends_sources = []
     for run_dep_name in [p.name for pth, p in run_depends]:
-        source_path = os.path.join(context.devel_space, run_dep_name, 'setup.sh')
+        source_path = os.path.join(context.devel_space_abs, run_dep_name, 'setup.sh')
         if os.path.isfile(source_path):
             run_depends_sources.append('. {0}'.format(source_path))
     # Create the setup.sh file
-    setup_sh_path = os.path.join(context.devel_space, 'setup.sh')
+    setup_sh_path = os.path.join(context.devel_space_abs, 'setup.sh')
     env_file = """\
 #!/usr/bin/env sh
 # generated from within catkin_tools/verbs/catkin_build/build.py
@@ -324,7 +246,7 @@ set -- $@ "--extend"
     # Make this file executable
     os.chmod(setup_sh_path, stat.S_IXUSR | stat.S_IWUSR | stat.S_IRUSR)
     # Create the setup.bash file
-    setup_bash_path = os.path.join(context.devel_space, 'setup.bash')
+    setup_bash_path = os.path.join(context.devel_space_abs, 'setup.bash')
     with open(setup_bash_path, 'w') as f:
         f.write("""\
 #!/usr/bin/env bash
@@ -338,7 +260,7 @@ _BUILD_SETUP_DIR=$(builtin cd "`dirname "${BASH_SOURCE[0]}"`" && pwd)
 """)
     # Make this file executable
     os.chmod(setup_bash_path, stat.S_IXUSR | stat.S_IWUSR | stat.S_IRUSR)
-    setup_zsh_path = os.path.join(context.devel_space, 'setup.zsh')
+    setup_zsh_path = os.path.join(context.devel_space_abs, 'setup.zsh')
     with open(setup_zsh_path, 'w') as f:
         f.write("""\
 #!/usr/bin/env zsh
@@ -357,7 +279,7 @@ emulate zsh # back to zsh mode
 
 
 def _create_unmerged_devel_setup_for_install(context):
-    for path in [os.path.join(context.devel_space, f) for f in ['setup.sh', 'setup.bash', 'setup.zsh']]:
+    for path in [os.path.join(context.devel_space_abs, f) for f in ['setup.sh', 'setup.bash', 'setup.zsh']]:
         with open(path, 'w') as f:
             f.write("""\
 #!/usr/bin/env sh
@@ -390,7 +312,8 @@ def build_isolated_workspace(
     quiet=False,
     interleave_output=False,
     no_status=False,
-    lock_install=False
+    lock_install=False,
+    no_notify=False
 ):
     """Builds a catkin workspace in isolation
 
@@ -422,6 +345,8 @@ def build_isolated_workspace(
     :type no_status: bool
     :param lock_install: causes executors to synchronize on access of install commands
     :type lock_install: bool
+    :param no_notify: suppresses system notifications
+    :type no_notify: bool
 
     :raises: SystemExit if buildspace is a file or no packages were found in the source space
         or if the provided options are invalid
@@ -430,16 +355,62 @@ def build_isolated_workspace(
     if no_deps and packages is None:
         sys.exit("With --no-deps, you must specify packages to build.")
     # Make sure there is a build folder and it is not a file
-    if os.path.exists(context.build_space):
-        if os.path.isfile(context.build_space):
-            sys.exit("Build space '{0}' exists but is a file and not a folder.".format(context.build_space))
+    if os.path.exists(context.build_space_abs):
+        if os.path.isfile(context.build_space_abs):
+            sys.exit(clr(
+                "@{rf}Error:@| Build space '{0}' exists but is a file and not a folder."
+                .format(context.build_space_abs)))
     # If it dosen't exist, create it
     else:
-        log("Creating buildspace directory, '{0}'".format(context.build_space))
-        os.makedirs(context.build_space)
+        log("Creating build space directory, '{0}'".format(context.build_space_abs))
+        os.makedirs(context.build_space_abs)
+
+    # Check for catkin_make droppings
+    if context.corrupted_by_catkin_make():
+        sys.exit(
+            clr("@{rf}Error:@| Build space `{0}` exists but appears to have previously been "
+                "created by the `catkin_make` or `catkin_make_isolated` tool. "
+                "Please choose a different directory to use with `catkin build` "
+                "or clean the build space.".format(context.build_space_abs)))
+
+    # Declare a buildspace marker describing the build config for error checking
+    buildspace_marker_data = {
+        'workspace': context.workspace,
+        'profile': context.profile,
+        'install': context.install,
+        'install_space': context.install_space_abs,
+        'devel_space': context.devel_space_abs,
+        'source_space': context.source_space_abs}
+
+    # Check build config
+    if os.path.exists(os.path.join(context.build_space_abs, BUILDSPACE_MARKER_FILE)):
+        with open(os.path.join(context.build_space_abs, BUILDSPACE_MARKER_FILE)) as buildspace_marker_file:
+            existing_buildspace_marker_data = yaml.load(buildspace_marker_file)
+            misconfig_lines = ''
+            for (k, v) in existing_buildspace_marker_data.items():
+                new_v = buildspace_marker_data.get(k, None)
+                if new_v != v:
+                    misconfig_lines += (
+                        '\n - %s: %s (stored) is not %s (commanded)' %
+                        (k, v, new_v))
+            if len(misconfig_lines) > 0:
+                sys.exit(clr(
+                    "\n@{rf}Error:@| Attempting to build a catkin workspace using build space: "
+                    "\"%s\" but that build space's most recent configuration "
+                    "differs from the commanded one in ways which will cause "
+                    "problems. Fix the following options or use @{yf}`catkin "
+                    "clean -b`@| to remove the build space: %s" %
+                    (context.build_space_abs, misconfig_lines)))
+
+    # Write the current build config for config error checking
+    with open(os.path.join(context.build_space_abs, BUILDSPACE_MARKER_FILE), 'w') as buildspace_marker_file:
+        buildspace_marker_file.write(yaml.dump(buildspace_marker_data, default_flow_style=False))
 
     # Summarize the context
-    log(context.summary())
+    summary_notes = []
+    if force_cmake:
+        summary_notes += [clr("@!@{cf}NOTE:@| Forcing CMake to run for each package.")]
+    log(context.summary(summary_notes))
 
     # Find list of packages in the workspace
     packages_to_be_built, packages_to_be_built_deps, all_packages = determine_packages_to_be_built(packages, context)
@@ -489,180 +460,189 @@ def build_isolated_workspace(
         executors[x] = e
         e.start()
 
-    # Variables for tracking running jobs and built/building packages
-    start = time.time()
-    total_packages = len(packages_to_be_built)
-    package_count = 0
-    running_jobs = {}
-    log_dir = os.path.join(context.build_space, 'build_logs')
-    color = True
-    if not force_color and not is_tty(sys.stdout):
+    try:  # Finally close out now running executors
+        # Variables for tracking running jobs and built/building packages
+        start = time.time()
+        total_packages = len(packages_to_be_built)
+        package_count = 0
+        running_jobs = {}
+        log_dir = os.path.join(context.build_space_abs, 'build_logs')
         color = True
-    out = OutputController(log_dir, quiet, interleave_output, color, max_package_name_length, prefix_output=(jobs > 1))
-    if no_status:
-        disable_wide_log()
+        if not force_color and not is_tty(sys.stdout):
+            color = True
+        out = OutputController(log_dir, quiet, interleave_output,
+                               color, max_package_name_length, prefix_output=(jobs > 1))
+        if no_status:
+            disable_wide_log()
 
-    # Prime the job_queue
-    ready_packages = []
-    if start_with is None:
-        ready_packages = get_ready_packages(packages_to_be_built, running_jobs, completed_packages)
-    while start_with is not None:
-        ready_packages.extend(get_ready_packages(packages_to_be_built, running_jobs, completed_packages))
-        while ready_packages:
-            pth, pkg = ready_packages.pop(0)
-            if pkg.name != start_with:
-                completed_packages.append(pkg.name)
-                package_count += 1
-                wide_log("[build] Skipping package '{0}'".format(pkg.name))
-            else:
-                ready_packages.insert(0, (pth, pkg))
-                start_with = None
-                break
-    running_jobs = queue_ready_packages(ready_packages, running_jobs, job_queue, context, force_cmake)
-    assert running_jobs
+        # Prime the job_queue
+        ready_packages = []
+        if start_with is None:
+            ready_packages = get_ready_packages(packages_to_be_built, running_jobs, completed_packages)
+        while start_with is not None:
+            ready_packages.extend(get_ready_packages(packages_to_be_built, running_jobs, completed_packages))
+            while ready_packages:
+                pth, pkg = ready_packages.pop(0)
+                if pkg.name != start_with:
+                    completed_packages.append(pkg.name)
+                    package_count += 1
+                    wide_log("[build] Skipping package '{0}'".format(pkg.name))
+                else:
+                    ready_packages.insert(0, (pth, pkg))
+                    start_with = None
+                    break
+        running_jobs = queue_ready_packages(ready_packages, running_jobs, job_queue, context, force_cmake)
+        assert running_jobs
 
-    error_state = False
-    errors = []
+        error_state = False
+        errors = []
 
-    def set_error_state(error_state):
-        if error_state:
-            return
-        # Set the error state to prevent new jobs
-        error_state = True
-        # Empty the job queue
-        while not job_queue.empty():
-            job_queue.get()
-        # Kill the executors by sending a None to the job queue for each of them
+        def set_error_state(error_state):
+            if error_state:
+                return
+            # Set the error state to prevent new jobs
+            error_state = True
+            # Empty the job queue
+            while not job_queue.empty():
+                job_queue.get()
+            # Kill the executors by sending a None to the job queue for each of them
+            for x in range(jobs):
+                job_queue.put(None)
+
+        # While any executors are running, process executor events
+        while executors:
+            try:
+                # Try to get an event from the communications queue
+                try:
+                    event = comm_queue.get(True, 0.1)
+                except Empty:
+                    # timeout occured, create null event to pass through checks
+                    event = ExecutorEvent(None, None, None, None)
+
+                if event.event_type == 'job_started':
+                    package_count += 1
+                    running_jobs[event.package]['package_number'] = package_count
+                    running_jobs[event.package]['start_time'] = time.time()
+                    out.job_started(event.package)
+
+                if event.event_type == 'command_started':
+                    out.command_started(event.package, event.data['cmd'], event.data['location'])
+
+                if event.event_type == 'command_log':
+                    out.command_log(event.package, event.data['message'])
+
+                if event.event_type == 'command_failed':
+                    out.command_failed(event.package, event.data['cmd'], event.data['location'], event.data['retcode'])
+                    # Add to list of errors
+                    errors.append(event)
+                    # Remove the command from the running jobs
+                    del running_jobs[event.package]
+                    # If it hasn't already been done, stop the executors
+                    set_error_state(error_state)
+
+                if event.event_type == 'command_finished':
+                    out.command_finished(event.package, event.data['cmd'],
+                                         event.data['location'], event.data['retcode'])
+
+                if event.event_type == 'job_finished':
+                    completed_packages.append(event.package)
+                    run_time = format_time_delta(time.time() - running_jobs[event.package]['start_time'])
+                    out.job_finished(event.package, run_time)
+                    del running_jobs[event.package]
+                    # If shutting down, do not add new packages
+                    if error_state:
+                        continue
+                    # Calculate new packages
+                    if not no_status:
+                        wide_log('[build] Calculating new jobs...', end='\r')
+                        sys.stdout.flush()
+                    ready_packages = get_ready_packages(packages_to_be_built, running_jobs, completed_packages)
+                    running_jobs = queue_ready_packages(ready_packages, running_jobs, job_queue, context, force_cmake)
+                    # Make sure there are jobs to be/being processed, otherwise kill the executors
+                    if not running_jobs:
+                        # Kill the executors by sending a None to the job queue for each of them
+                        for x in range(jobs):
+                            job_queue.put(None)
+
+                # If an executor exit event, join it and remove it from the executors list
+                if event.event_type == 'exit':
+                    # If an executor has an exception, set the error state
+                    if event.data['reason'] == 'exception':
+                        set_error_state(error_state)
+                        errors.append(event)
+                    # Join and remove it
+                    executors[event.executor_id].join()
+                    del executors[event.executor_id]
+
+                if not no_status:
+                    # Update the status bar on the screen
+                    executing_jobs = []
+                    for name, value in running_jobs.items():
+                        number, job, start_time = value['package_number'], value['job'], value['start_time']
+                        if number is None or start_time is None:
+                            continue
+                        executing_jobs.append({
+                            'number': number,
+                            'name': name,
+                            'run_time': format_time_delta_short(time.time() - start_time)
+                        })
+                    msg = clr("[build - {run_time}] ").format(run_time=format_time_delta_short(time.time() - start))
+                    # If errors post those
+                    if errors:
+                        for error in errors:
+                            msg += clr("[!{package}] ").format(package=error.package)
+                    # Print them in order of started number
+                    for job_msg_args in sorted(executing_jobs, key=lambda args: args['number']):
+                        msg += clr("[{name} - {run_time}] ").format(**job_msg_args)
+                    msg_rhs = clr("[{0}/{1} Active | {2}/{3} Completed]").format(
+                        len(executing_jobs),
+                        len(executors),
+                        len(packages) if no_deps else len(completed_packages),
+                        total_packages
+                    )
+                    # Update title bar
+                    sys.stdout.write("\x1b]2;[build] {0}/{1}\x07".format(
+                        len(packages) if no_deps else len(completed_packages),
+                        total_packages
+                    ))
+                    # Update status bar
+                    wide_log(msg, rhs=msg_rhs, end='\r')
+                    sys.stdout.flush()
+            except KeyboardInterrupt:
+                wide_log("[build] User interrupted, stopping.")
+                set_error_state(error_state)
+        # All executors have shutdown
+        sys.stdout.write("\x1b]2;\x07")
+        if not errors:
+            if context.isolate_devel:
+                if not context.install:
+                    _create_unmerged_devel_setup(context)
+                else:
+                    _create_unmerged_devel_setup_for_install(context)
+            wide_log("[build] Finished.")
+            if not no_notify:
+                notify("Build Finished", "{0} packages built".format(total_packages))
+            return 0
+        else:
+            wide_log(clr("[build] There were @!@{rf}errors@|:"))
+            if not no_notify:
+                notify("Build Failed", "there were {0} errors".format(len(errors)))
+            for error in errors:
+                if error.event_type == 'exit':
+                    wide_log("""Executor '{exec_id}' had an unhandle exception while processing package '{package}':
+
+    {data[exc]}
+    """.format(exec_id=error.executor_id + 1, **error.__dict__))
+                else:
+                    wide_log(clr("""
+    @{rf}Failed@| to build package '@{cf}{package}@|' because the following command:
+
+        @!@{kf}# Command run in directory: @|{location}
+        {cmd.cmd_str}
+
+    @{rf}Exited@| with return code: @!{retcode}@|""").format(package=error.package, **error.data))
+            sys.exit(1)
+    finally:
+        # Ensure executors go down
         for x in range(jobs):
             job_queue.put(None)
-
-    # While any executors are running, process executor events
-    while executors:
-        try:
-            # Try to get an event from the communications queue
-            try:
-                event = comm_queue.get(True, 0.1)
-            except Empty:
-                # timeout occured, create null event to pass through checks
-                event = ExecutorEvent(None, None, None, None)
-
-            if event.event_type == 'job_started':
-                package_count += 1
-                running_jobs[event.package]['package_number'] = package_count
-                running_jobs[event.package]['start_time'] = time.time()
-                out.job_started(event.package)
-
-            if event.event_type == 'command_started':
-                out.command_started(event.package, event.data['cmd'], event.data['location'])
-
-            if event.event_type == 'command_log':
-                out.command_log(event.package, event.data['message'])
-
-            if event.event_type == 'command_failed':
-                out.command_failed(event.package, event.data['cmd'], event.data['location'], event.data['retcode'])
-                # Add to list of errors
-                errors.append(event)
-                # Remove the command from the running jobs
-                del running_jobs[event.package]
-                # If it hasn't already been done, stop the executors
-                set_error_state(error_state)
-
-            if event.event_type == 'command_finished':
-                out.command_finished(event.package, event.data['cmd'], event.data['location'], event.data['retcode'])
-
-            if event.event_type == 'job_finished':
-                completed_packages.append(event.package)
-                run_time = format_time_delta(time.time() - running_jobs[event.package]['start_time'])
-                out.job_finished(event.package, run_time)
-                del running_jobs[event.package]
-                # If shutting down, do not add new packages
-                if error_state:
-                    continue
-                # Calculate new packages
-                if not no_status:
-                    wide_log('[build] Calculating new jobs...', end='\r')
-                    sys.stdout.flush()
-                ready_packages = get_ready_packages(packages_to_be_built, running_jobs, completed_packages)
-                running_jobs = queue_ready_packages(ready_packages, running_jobs, job_queue, context, force_cmake)
-                # Make sure there are jobs to be/being processed, otherwise kill the executors
-                if not running_jobs:
-                    # Kill the executors by sending a None to the job queue for each of them
-                    for x in range(jobs):
-                        job_queue.put(None)
-
-            # If an executor exit event, join it and remove it from the executors list
-            if event.event_type == 'exit':
-                # If an executor has an exception, set the error state
-                if event.data['reason'] == 'exception':
-                    set_error_state(error_state)
-                    errors.append(event)
-                # Join and remove it
-                executors[event.executor_id].join()
-                del executors[event.executor_id]
-
-            if not no_status:
-                # Update the status bar on the screen
-                executing_jobs = []
-                for name, value in running_jobs.items():
-                    number, job, start_time = value['package_number'], value['job'], value['start_time']
-                    if number is None or start_time is None:
-                        continue
-                    executing_jobs.append({
-                        'number': number,
-                        'name': name,
-                        'run_time': format_time_delta_short(time.time() - start_time)
-                    })
-                msg = clr("[build - {run_time}] ").format(run_time=format_time_delta_short(time.time() - start))
-                # If errors post those
-                if errors:
-                    for error in errors:
-                        msg += clr("[!{package}] ").format(package=error.package)
-                # Print them in order of started number
-                for job_msg_args in sorted(executing_jobs, key=lambda args: args['number']):
-                    msg += clr("[{name} - {run_time}] ").format(**job_msg_args)
-                msg_rhs = clr("[{0}/{1} Active | {2}/{3} Completed]").format(
-                    len(executing_jobs),
-                    len(executors),
-                    len(packages) if no_deps else len(completed_packages),
-                    total_packages
-                )
-                # Update title bar
-                sys.stdout.write("\x1b]2;[build] {0}/{1}\x07".format(
-                    len(packages) if no_deps else len(completed_packages),
-                    total_packages
-                ))
-                # Update status bar
-                wide_log(msg, rhs=msg_rhs, end='\r')
-                sys.stdout.flush()
-        except KeyboardInterrupt:
-            wide_log("[build] User interrupted, stopping.")
-            set_error_state(error_state)
-    # All executors have shutdown
-    sys.stdout.write("\x1b]2;\x07")
-    if not errors:
-        if context.isolate_devel:
-            if not context.install:
-                _create_unmerged_devel_setup(context)
-            else:
-                _create_unmerged_devel_setup_for_install(context)
-        wide_log("[build] Finished.")
-        notify("Build Finished", "{0} packages built".format(total_packages))
-        return 0
-    else:
-        wide_log(clr("[build] There were @!@{rf}errors@|:"))
-        notify("Build Failed", "there were {0} errors".format(len(errors)))
-        for error in errors:
-            if error.event_type == 'exit':
-                wide_log("""Executor '{exec_id}' had an unhandle exception while processing package '{package}':
-
-{data[exc]}
-""".format(exec_id=error.executor_id + 1, **error.__dict__))
-            else:
-                wide_log(clr("""
-@{rf}Failed@| to build package '@{cf}{package}@|' because the following command:
-
-    @!@{kf}# Command run in directory: @|{location}
-    {cmd.cmd_str}
-
-@{rf}Exited@| with return code: @!{retcode}@|""").format(package=error.package, **error.data))
-        sys.exit(1)

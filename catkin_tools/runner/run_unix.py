@@ -27,7 +27,7 @@ from subprocess import STDOUT
 def process_incomming_lines(lines, left_over):
     if not lines:
         return None, left_over
-    if lines[-1].endswith('\n'):
+    if lines[-1].endswith(b'\n'):
         data = b''.join(lines)
         left_over = b''
     else:
@@ -42,7 +42,7 @@ def run_command(cmd, cwd=None):
     p = None
     while p is None:
         try:
-            p = Popen(cmd, stdin=slave, stdout=slave, stderr=STDOUT, cwd=cwd)
+            p = Popen(cmd, stdin=slave, stdout=slave, stderr=STDOUT, cwd=cwd, universal_newlines=True)
         except OSError as exc:
             if 'Text file busy' in str(exc):
                 # This is a transient error, try again shortly
@@ -57,15 +57,18 @@ def run_command(cmd, cwd=None):
     # Read data until the process is finished
     while p.poll() is None:
         incomming = left_over
-        rlist, wlist, xlist = select.select([master], [], [], 0.1)
+        rlist, wlist, xlist = select.select([master], [], [], 0.01)
         if rlist:
             incomming += os.read(master, 1024)
             lines = incomming.splitlines(True)  # keepends=True
             data, left_over = process_incomming_lines(lines, left_over)
             if data is None:
                 continue
-            yield data
+            try:
+                yield data.decode()
+            except UnicodeDecodeError as exc:
+                yield unicode(data, errors='ignore')
 
     # Done
     os.close(master)
-    yield p.returncode
+    yield int(p.returncode)
